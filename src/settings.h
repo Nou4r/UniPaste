@@ -2,17 +2,24 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include "policy.h"
 #include "spoof.h"
 
 namespace settings {
 
-using GetModeFn = uni::Mode (*)();
-using SetModeFn = void (*)(uni::Mode);
+struct Callbacks {
+    uni::Mode           (*getMode)();
+    void                (*setMode)(uni::Mode);
+    uni::policy::Options(*getOptions)();
+    void                (*setOptions)(const uni::policy::Options&);
+    bool                (*getAutoConvert)();
+    void                (*setAutoConvert)(bool);
+};
 
-bool Init(HINSTANCE hInst, GetModeFn getMode, SetModeFn setMode);
-void Show();                    // create-or-activate the settings window
-void NotifyModeChanged();       // mode changed elsewhere; refresh the UI
+bool Init(HINSTANCE hInst, const Callbacks& cb);
+void Show();
+void NotifyStateChanged();      // mode/options/auto-convert changed elsewhere
 void Shutdown();
-bool HandleDialogMessage(MSG* msg);  // main loop calls this before TranslateMessage
+bool HandleDialogMessage(MSG* msg);
 
 } // namespace settings

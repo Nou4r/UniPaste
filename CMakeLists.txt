@@ -12,7 +12,9 @@ add_executable(UniPaste WIN32
     src/main.cpp
     src/spoof.cpp
     src/overlay.cpp
-    src/whitelist.cpp
+    src/wordlist.cpp
+    src/links.cpp
+    src/policy.cpp
     src/settings.cpp
     src/theme.cpp
     src/appicon.cpp

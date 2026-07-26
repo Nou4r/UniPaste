@@ -10,7 +10,7 @@ different string, because `a` is now `U+0430 CYRILLIC SMALL LETTER A` and no lon
 
 It is a native C++17 Win32 application: plain Win32, GDI and common controls, no .NET, no Electron,
 no Qt, no runtime redistributable. The Release build is a single statically-linked executable of
-roughly 203 KB (207,872 bytes at the time of writing) that links only `user32`, `gdi32`, `shell32`,
+roughly 221 KB (226,304 bytes at the time of writing) that links only `user32`, `gdi32`, `shell32`,
 `advapi32`, `comctl32`, `uxtheme` and `dwmapi`, with the CRT linked statically
 (`MSVC_RUNTIME_LIBRARY = MultiThreaded`).
 
@@ -22,20 +22,34 @@ roughly 203 KB (207,872 bytes at the time of writing) that links only `user32`, 
   window, and flash a confirmation toast. Works in any application, no per-app integration.
 - **Global `Shift + Numpad8`** - cycle the conversion mode `Basic -> Advanced -> First -> Smart -> Basic`
   without leaving the keyboard; the new mode is announced by a toast.
+- **Global `Shift + Numpad7`** - toggle convert on copy without opening anything; the new state is
+  announced by a toast.
 - **Four conversion modes** - `Basic`, `Advanced`, `First` and `Smart`, ported verbatim from the
   bundled browser tool (`index.html`).
-- **Whitelist** - words and phrases that must never be converted (product names, URLs, identifiers,
-  code snippets), managed from a settings GUI and stored as a plain text file.
-- **Settings GUI** - a small native dialog for editing the whitelist and switching the active mode.
+- **Links are never converted** - URLs, bare domains, e-mail addresses, `@handles`, Windows drive
+  paths and UNC paths keep their original code points whatever the mode and whatever the policy.
+  On by default.
+- **Two protection policies** - *Never convert*, the default, where a word list names the things to
+  leave alone; and *Only convert* (blacklist mode), where nothing is converted except the words on a
+  second, separate list.
+- **Convert on copy** - when enabled, anything that reaches the clipboard is converted in place the
+  moment it is copied. Nothing is pasted. Off by default.
+- **Settings GUI** - a small native dialog for editing the word lists, choosing the policy,
+  switching the active mode and reviewing the keybinds.
 - **Toast notification** - a borderless, click-through, never-focus-stealing layered window in the
   top-right corner of the monitor holding the foreground window. Green accent on success, red on
   error (`Clipboard is busy`, `Clipboard has no text`, ...).
-- **Tray icon** - right-click for the mode radio menu, `Settings...` and `Exit`.
+- **Tray icon** - right-click for the mode radio menu, the convert-on-copy toggle, `Settings...`
+  and `Exit`.
 - **Single instance** - guarded by a named mutex (`Local\UniPaste_SingleInstance`); launching a
   second copy shows a message box and exits.
-- **Persistence**
-  - Active mode: `HKCU\Software\UniPaste`, value `Mode`, `REG_DWORD` `0..3`.
-  - Whitelist: `%APPDATA%\UniPaste\whitelist.txt`, UTF-8, one entry per line.
+- **Persistence** - everything below `HKCU\Software\UniPaste` is `REG_DWORD`.
+  - Active mode: value `Mode`, `0..3`.
+  - Blacklist mode: value `BlacklistMode`, `0`/`1`, default `0`.
+  - Link protection: value `ProtectLinks`, `0`/`1`, default `1`.
+  - Convert on copy: value `AutoConvert`, `0`/`1`, default `0`.
+  - Word lists: `%APPDATA%\UniPaste\whitelist.txt` and `%APPDATA%\UniPaste\blacklist.txt`, UTF-8,
+    one entry per line.
 
 ---
 
@@ -106,33 +120,54 @@ Run `UniPaste.exe`. It has no main window - it lives in the notification area.
 | --- | --- |
 | `Shift + Numpad9` | Read the clipboard, convert it with the active mode, write it back, release the held modifiers and send `Ctrl+V` to the foreground window, then show the toast `Conversion successful`. On failure the toast turns red and names the problem instead. |
 | `Shift + Numpad8` | Advance the conversion mode one step: `Basic -> Advanced -> First -> Smart -> Basic`. The new mode is saved to the registry immediately and announced by the toast `Mode: <name>`. Nothing is pasted. |
+| `Shift + Numpad7` | Toggle convert on copy on or off. The new state is saved to the registry immediately, mirrored in the tray menu and the settings window, and announced by a toast. Nothing is converted or pasted by the chord itself. |
 
-Both chords require the **numpad** keys. The grey `PageUp` and arrow `Up` keys are deliberately not
-hijacked (see [Numpad vs navigation keys](#numpad-vs-navigation-keys)). NumLock may be on or off.
+All three chords require the **numpad** keys. The grey `PageUp`, arrow `Up` and `Home` keys are
+deliberately not hijacked (see [Numpad vs navigation keys](#numpad-vs-navigation-keys)). NumLock may
+be on or off.
 
 ### Tray menu
 
 Right-click the tray icon:
 
-- **Settings...** - the default (bold) first item; opens the settings window (whitelist editor +
-  mode selection).
+- **Settings...** - the default (bold) first item; opens the settings window (mode, word lists and
+  policy, toggles, keybinds).
 - **Basic / Advanced / First / Smart** - radio group showing and setting the active mode.
+- **Convert on copy** - a checkable item mirroring the toggle in the settings window and
+  `Shift + Numpad7`.
 - **Exit** - quits the application.
 
 Double-clicking the tray icon opens the settings window directly.
 
 The settings window is modeless: it can stay open while you keep using the hotkeys, and it refreshes
-itself when the mode is changed from the tray menu or by `Shift + Numpad8`. Closing it does not quit
-the application - use **Exit** for that.
+itself whenever the state changes elsewhere - the mode from the tray menu or `Shift + Numpad8`, the
+convert-on-copy flag from the tray menu or `Shift + Numpad7`. Closing it does not quit the
+application - use **Exit** for that.
 
 ### Settings window
 
 A single dark surface, drawn rather than themed: the four modes are a segmented bar instead of a
 drop-down, and the card under it is a **live specimen** of the active mode. It runs the sample
-`Mixed Case 123` through the real converter - whitelist included - draws every substituted glyph in
-amber against the unchanged characters, and lists the substitutions as `i -> U+0456` pairs in a
-monospace face. Switching modes re-renders it, so the difference between `Basic` and `Advanced` is
-visible before you convert anything.
+`Mixed Case 123` through the real converter - the active protection policy included - draws every
+substituted glyph in amber against the unchanged characters, and lists the substitutions as
+`i -> U+0456` pairs in a monospace face. Switching modes re-renders it, so the difference between
+`Basic` and `Advanced` is visible before you convert anything.
+
+The two word lists share **one segmented control**, and that control is also the policy switch.
+Selecting **Never convert** shows the never-convert list and makes it the active policy; selecting
+**Only convert** shows the only-convert list and puts the application into blacklist mode. One list
+is visible at a time and the add field and remove button act on whichever is selected, so choosing a
+list and choosing a policy are the same gesture - one concept, one control. With **Only convert**
+selected and its list empty, the panel says so, because in that state nothing would be converted at
+all.
+
+Two pill toggles sit with it: **Protect links**, on by default, and **Convert on copy**, off by
+default. Both are written to the registry the moment they are flipped, and convert on copy stays in
+step with the tray item and `Shift + Numpad7`.
+
+A **keybinds panel** shows all three chords drawn as key caps - `Shift` next to the numpad key -
+with what each one does. The convert-on-copy row carries a live chip reading the current on/off
+state, so the panel reports what the hotkey will do next rather than only what it is bound to.
 
 Everything is keyboard operable. `Tab` reaches the segmented bar at the currently active cell;
 `Left` / `Right` / `Up` / `Down` change the mode, `Home` and `End` jump to the ends. `Enter` in the
@@ -218,39 +253,72 @@ gap rather than inventing a glyph.
 
 ---
 
-## Whitelist
+## Protection policy
 
 Homoglyph substitution breaks anything that is parsed rather than read: URLs, e-mail addresses,
-usernames, file paths, command lines, product names, API keys. The whitelist is the escape hatch -
-a list of words and phrases that keep their original code points no matter which mode is active.
-Everything around them is still converted.
+usernames, file paths, command lines, product names, API keys. Two mechanisms decide what survives -
+a **policy**, driven by a word list, and **link protection** layered on top of it. Both express
+themselves the same way, as a per-code-unit protected mask handed to the converter, so a partially
+protected line converts everything outside the protected spans normally and leaves the rest byte for
+byte as it was.
+
+### The two policies
+
+| Policy | What it does | Backing file |
+| --- | --- | --- |
+| **Never convert** (default) | Everything is converted *except* the listed words and phrases. The list is the escape hatch for product names, identifiers, code snippets. | `%APPDATA%\UniPaste\whitelist.txt` |
+| **Only convert** (blacklist mode) | *Nothing* is converted except the listed words and phrases. Everything unlisted keeps its original code points. | `%APPDATA%\UniPaste\blacklist.txt` |
+
+The two lists are separate files with an identical format and an identical matcher. Switching policy
+never rewrites, merges or reinterprets the other list: silently inverting one curated list would
+convert exactly the words the user had put there to protect, which is the reason there are two.
+
+Blacklist mode is expressed through the same protected-span mask as the default policy - "convert
+only these words" is just `protected = NOT(listed spans)` - so the converter itself is identical
+under both policies.
+
+Three consequences worth stating plainly:
+
+- **Blacklist mode ignores the never-convert list.** Anything absent from the only-convert list is
+  already protected, so there is nothing left for the other list to protect.
+- **Link protection still applies on top.** A word that is on the only-convert list stays intact
+  when it occurs inside a URL, an e-mail address or a path.
+- **An empty only-convert list converts nothing.** That is the rule working correctly rather than a
+  failure, and the settings window warns about it when blacklist mode is selected with an empty
+  list.
+
+The policy is persisted as `BlacklistMode` under `HKCU\Software\UniPaste`, `REG_DWORD` `0`/`1`,
+default `0`.
 
 ### Matching rules
 
-- **Case-insensitive**, using the same ASCII-only fold as the converter (`A-Z` only; a whitelist
-  entry `GitHub` protects `github`, `GITHUB` and `GitHub`).
+Both lists are matched the same way:
+
+- **Case-insensitive**, using the same ASCII-only fold as the converter (`A-Z` only; an entry
+  `GitHub` matches `github`, `GITHUB` and `GitHub`).
 - **Word-boundary anchored at both ends.** An entry only matches when the character immediately
-  before and immediately after the match is not a word character, so `cat` protects `cat` and
+  before and immediately after the match is not a word character, so `cat` matches `cat` and
   `the cat sat` but not `concatenate`, `cats` or `bobcat`.
 - **Word characters** are `A-Z`, `a-z`, `0-9`, `_` and *any* code unit `>= 0x80`. Treating all
   non-ASCII as word characters means an already-converted homoglyph counts as part of a word, so a
   boundary is never found in the middle of previously converted text.
-- **Phrases are allowed.** An entry may contain spaces and punctuation; `Visual Studio` protects the
+- **Phrases are allowed.** An entry may contain spaces and punctuation; `Visual Studio` matches the
   whole two-word phrase. Matching is on the literal sequence, so the spacing must line up.
 - Overlapping entries never double-mark: at each position the longest matching entry wins and the
-  scan resumes after it, so `New` and `New York` together protect `New York` as one span.
-- Protection is per code unit, applied as a mask handed to the converter, so a partially protected
-  line converts everything outside the protected spans normally.
+  scan resumes after it, so `New` and `New York` together mark `New York` as one span.
+- Marking is per code unit. What the marked spans *mean* is the policy's business: under **Never
+  convert** they are the protected spans; under **Only convert** everything outside them is.
 
 ### Storage
 
-The list lives in:
+The lists live side by side:
 
 ```text
-%APPDATA%\UniPaste\whitelist.txt
+%APPDATA%\UniPaste\whitelist.txt     entries that are never converted
+%APPDATA%\UniPaste\blacklist.txt     the only entries that are converted
 ```
 
-It is a plain UTF-8 text file, safe to edit by hand or keep under version control:
+Each is a plain UTF-8 text file, safe to edit by hand or keep under version control:
 
 ```text
 # Lines starting with '#' are comments.
@@ -264,12 +332,62 @@ UniPaste
 - One entry per line.
 - Blank lines are ignored.
 - A line whose first non-space character is `#` is a comment.
-- Duplicate entries are rejected when added through the GUI.
-- A missing file is not an error - it simply means an empty whitelist.
+- Entries that are empty after trimming, and duplicates, are rejected when added through the GUI.
+- A missing file is not an error - it simply means an empty list.
 
-The settings window writes the file whenever the list changes, so hand edits made while the
+The settings window writes the file of whichever list changed, so hand edits made while the
 application is running should be followed by a restart (or a reopen of the settings window) to avoid
 being overwritten.
+
+### Link protection
+
+On by default and independent of the policy, link protection marks the things that must survive
+verbatim because they are addresses rather than prose:
+
+| Recognised | Example |
+| --- | --- |
+| URL with a scheme | `https://example.com/a?b=c` |
+| Bare domain with an alphabetic TLD | `api.example.com` |
+| E-mail address | `user@host.tld` |
+| `@handle` | `@example` |
+| Windows drive path | `C:\Users\me\notes.txt` |
+| UNC path | `\\server\share\notes.txt` |
+
+Trailing sentence punctuation is excluded from the span, so in `See https://example.com.` the URL is
+protected and the full stop that ends the sentence is not.
+
+These spans are ORed into the mask produced by whichever policy is active, so link protection holds
+in both of them - including over a word that is on the only-convert list. It is persisted as
+`ProtectLinks` under `HKCU\Software\UniPaste`, `REG_DWORD` `0`/`1`, default `1`.
+
+---
+
+## Convert on copy
+
+Normally nothing happens until you press `Shift + Numpad9`. With **convert on copy** enabled the
+application listens to the clipboard instead: the moment any text lands there - your own `Ctrl+C`, a
+context menu, another program - it is converted with the active mode and the active protection
+policy and written straight back. Nothing is pasted and no keystrokes are synthesised; the text is
+simply already converted by the time you paste it yourself.
+
+It can be turned on in three equivalent ways, all writing the same registry value:
+
+- the **Convert on copy** pill toggle in the settings window,
+- the **Convert on copy** item in the tray menu,
+- `Shift + Numpad7`.
+
+### Caveats
+
+- **It is off by default**, and deliberately so (`AutoConvert`, `REG_DWORD` `0`/`1`, default `0`).
+- **It touches everything you copy.** There is no per-application filter and no confirmation step,
+  so link protection and the word lists are the only things standing between the feature and a
+  copied password, command line or identifier. Set them up before leaving it on.
+- **Large payloads are skipped.** Text longer than 200,000 characters is passed over untouched
+  rather than converted.
+- **The app ignores clipboard updates it caused itself.** Writing the converted text back raises
+  another clipboard notification, which would be converted again, and again. UniPaste records the
+  `GetClipboardSequenceNumber` value produced by its own write and ignores the update carrying it,
+  so each copy is converted exactly once.
 
 ---
 
@@ -337,9 +455,9 @@ the batch lets the user's own key-up storm drain first.
 
 ### Numpad vs navigation keys
 
-With NumLock on and Shift held, numpad 9 and numpad 8 do not report as `VK_NUMPAD9` / `VK_NUMPAD8` -
-they report as `VK_PRIOR` (`0x21`) and `VK_UP` (`0x26`), the navigation meanings. They keep the
-numpad's own scan codes though, and those are **non-extended**:
+With NumLock on and Shift held, numpad 9, 8 and 7 do not report as `VK_NUMPAD9` / `VK_NUMPAD8` /
+`VK_NUMPAD7` - they report as `VK_PRIOR` (`0x21`), `VK_UP` (`0x26`) and `VK_HOME` (`0x24`), the
+navigation meanings. They keep the numpad's own scan codes though, and those are **non-extended**:
 
 | Physical key | Virtual key under Shift | Scan code | Extended flag |
 | --- | --- | --- | --- |
@@ -347,12 +465,14 @@ numpad's own scan codes though, and those are **non-extended**:
 | Grey PageUp | `VK_PRIOR` | `0x49` | **yes** (`0xE0 0x49`) |
 | Numpad 8 | `VK_UP` | `0x48` | no |
 | Grey arrow Up | `VK_UP` | `0x48` | **yes** (`0xE0 0x48`) |
+| Numpad 7 | `VK_HOME` | `0x47` | no |
+| Grey Home | `VK_HOME` | `0x47` | **yes** (`0xE0 0x47`) |
 
 The hook matches on virtual key **plus** scan code **plus** the absence of `LLKHF_EXTENDED`, so
-`Shift + PageUp` and `Shift + Up` on the navigation cluster - i.e. ordinary text selection - keep
-working exactly as they always did. The same asymmetry is respected on the way out: the synthetic
-key-up for the trigger is sent without `KEYEVENTF_EXTENDEDKEY`, because the key being released is the
-numpad one.
+`Shift + PageUp`, `Shift + Up` and `Shift + Home` on the navigation cluster - i.e. ordinary text
+selection - keep working exactly as they always did. The same asymmetry is respected on the way out:
+the synthetic key-up for the trigger is sent without `KEYEVENTF_EXTENDEDKEY`, because the key being
+released is the numpad one.
 
 ### Toast rendering
 
@@ -397,16 +517,25 @@ UniPaste/
 │   └── settings.png    Screenshot of the settings window used above.
 └── src/
     ├── main.cpp        wWinMain, single-instance mutex, hidden UniPasteMain window, tray icon and
-    │                   menu, WH_KEYBOARD_LL hook on its own pump thread, clipboard read/write with
-    │                   retries, atomic SendInput paste, registry-backed mode.
+    │                   menu, WH_KEYBOARD_LL hook on its own pump thread carrying all three chords,
+    │                   clipboard read/write with retries, atomic SendInput paste, the clipboard
+    │                   listener behind convert on copy, and the registry-backed mode, policy
+    │                   options and auto-convert flag.
     ├── spoof.h         Mode enum, Convert() with the protected-span mask, ModeName(), NextMode().
     ├── spoof.cpp       The two homoglyph tables and the four mode algorithms.
     ├── overlay.h       Toast API: Init / Show(text, Kind) / Shutdown.
     ├── overlay.cpp     Layered-window toast: DIB surface, rounded-card rasteriser with antialiased
     │                   corners, per-monitor DPI scaling, fade/slide animation.
-    ├── whitelist.h     Whitelist API: Entries / Add / RemoveAt / Load / Save / FilePath / Mark.
-    ├── whitelist.cpp   Whitelist storage (%APPDATA%\UniPaste\whitelist.txt) and the word-boundary,
-    │                   case-insensitive matcher that builds the protected-span mask.
+    ├── wordlist.h      Word-list API covering both lists: Kind::Never / Kind::Only, then Entries /
+    │                   Add / RemoveAt / Load / Save / FilePath / Mark.
+    ├── wordlist.cpp    Storage for whitelist.txt and blacklist.txt under %APPDATA%\UniPaste, and
+    │                   the word-boundary, case-insensitive matcher that marks one list's spans.
+    ├── links.h         Link API: MarkInto(input, mask).
+    ├── links.cpp       Recognises URLs, bare domains, e-mail addresses, @handles, Windows drive
+    │                   paths and UNC paths, and ORs their spans into the mask.
+    ├── policy.h        Options (blacklistMode, protectLinks), BuildMask() and Apply().
+    ├── policy.cpp      The single place that decides protection: the Never list OR links, or in
+    │                   blacklist mode NOT(the Only list) OR links.
     ├── theme.h         Design tokens (palette, six font roles) and the drawing API.
     ├── theme.cpp       Font cache, dark title bar, and an offscreen BGRA canvas with antialiased
     │                   rounded-rectangle fills and strokes - GDI has no antialiased primitives, so
@@ -415,11 +544,13 @@ UniPaste/
     ├── appicon.cpp     Generates the app icon at runtime - a Cyrillic small a (U+0430) in amber on
     │                   a rounded tile. The mark is the product: it reads as a Latin 'a' but is the
     │                   substituted character.
-    ├── settings.h      Settings window API: Init / Show / NotifyModeChanged / Shutdown /
+    ├── settings.h      Settings window API: Init / Show / NotifyStateChanged / Shutdown /
     │                   HandleDialogMessage.
-    └── settings.cpp    The settings GUI: segmented mode bar, live specimen card, owner-drawn
-                        whitelist list, and the add/remove controls, kept in sync with the tray
-                        menu and the mode-cycle hotkey.
+    └── settings.cpp    The settings GUI: segmented mode bar, live specimen card, the word-list
+                        segmented control that doubles as the policy switch, the owner-drawn list
+                        with its add and remove controls, the protect-links and convert-on-copy
+                        pill toggles, and the keybinds panel - all kept in sync with the tray menu
+                        and the hotkeys.
 ```
 
 ---
@@ -429,8 +560,8 @@ UniPaste/
 The Basic and Advanced substitution tables, the `spoofChar` lookup semantics (including the
 lowercase-only mapping) and the `First` / `Smart` mode definitions all originate from the bundled
 `index.html`, a self-contained Alpine.js + Tailwind browser tool. UniPaste is a native port of that
-tool with a global hotkey, a whitelist and a tray UI on top; the conversion output is intended to be
-byte-for-byte identical to the web version for the same input and mode.
+tool with global hotkeys, a protection policy and a tray UI on top; the conversion output is intended
+to be byte-for-byte identical to the web version for the same input and mode.
 
 ## License
 

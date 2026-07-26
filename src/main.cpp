@@ -1,29 +1,35 @@
 // UniPaste - native Win32 tray application.
 //
-// Shift + Numpad9 reads the clipboard, runs the Unicode homoglyph substitution
-// from spoof.cpp over it (skipping anything the whitelist protects), writes the
-// result back to the clipboard, synthesises Ctrl+V into the foreground window
-// and flashes a small transient toast in the top-right corner of the screen.
+// Three chords, all caught by the low-level keyboard hook:
 //
-// Shift + Numpad8 cycles the conversion mode and only shows the toast - it
-// never touches the clipboard and never pastes.
+//   Shift + Numpad9  reads the clipboard, runs the Unicode homoglyph
+//                    substitution from spoof.cpp over it (skipping every span
+//                    uni::policy protects), writes the result back to the
+//                    clipboard, synthesises Ctrl+V into the foreground window
+//                    and flashes a small transient toast.
+//   Shift + Numpad8  cycles the conversion mode and only shows the toast - it
+//                    never touches the clipboard and never pastes.
+//   Shift + Numpad7  toggles convert-on-copy. While that is on, any text that
+//                    reaches the clipboard is converted in place immediately,
+//                    with no chord and no paste.
 //
-// The tray icon exposes the same mode choice plus a settings window (whitelist
-// editor + mode combo), which is also what a double-click on the icon opens.
+// The tray icon exposes the same mode choice, the three policy toggles and a
+// settings window (word lists + mode + keybinds), which is also what a
+// double-click on the icon opens.
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
 
 #include <string>
-#include <vector>
 
 #include "appicon.h"
 #include "overlay.h"
+#include "policy.h"
 #include "settings.h"
 #include "spoof.h"
 #include "theme.h"
-#include "whitelist.h"
+#include "wordlist.h"
 
 // Present in the Windows 10 1703+ SDK headers only; define a compatible
 // fallback so the translation unit builds against older SDKs too. The value is
@@ -33,18 +39,29 @@
 #define DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4)))
 #endif
 
+// Vista+ clipboard-listener notification. Declared here for the same reason as
+// the DPI context above: the listener entry points are resolved dynamically, so
+// an older *runtime* simply never delivers this message.
+#ifndef WM_CLIPBOARDUPDATE
+#define WM_CLIPBOARDUPDATE 0x031D
+#endif
+
 namespace {
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-constexpr wchar_t kClassName[] = L"UniPasteMain";
-constexpr wchar_t kAppName[]   = L"UniPaste";
-constexpr wchar_t kMutexName[] = L"Local\\UniPaste_SingleInstance";
-constexpr wchar_t kRegPath[]   = L"Software\\UniPaste";
-constexpr wchar_t kRegValue[]  = L"Mode";
-constexpr wchar_t kTrayTip[]   = L"UniPaste - Shift+Numpad9 convert, Shift+Numpad8 mode";
+constexpr wchar_t kClassName[]        = L"UniPasteMain";
+constexpr wchar_t kAppName[]          = L"UniPaste";
+constexpr wchar_t kMutexName[]        = L"Local\\UniPaste_SingleInstance";
+constexpr wchar_t kRegPath[]          = L"Software\\UniPaste";
+constexpr wchar_t kRegMode[]          = L"Mode";
+constexpr wchar_t kRegBlacklistMode[] = L"BlacklistMode";
+constexpr wchar_t kRegProtectLinks[]  = L"ProtectLinks";
+constexpr wchar_t kRegAutoConvert[]   = L"AutoConvert";
+constexpr wchar_t kTrayTip[] =
+    L"UniPaste - Shift+Numpad9 convert, Shift+Numpad8 mode, Shift+Numpad7 convert on copy";
 
 constexpr UINT kTrayCallback = WM_APP + 1;
 constexpr UINT kTrayIconId   = 1;
@@ -56,32 +73,40 @@ constexpr UINT kTrayIconId   = 1;
 // keyboard hook further down; these registrations remain as a fallback for the
 // case where the hook cannot be installed, where they work with NumLock OFF.
 //
-// The mode chord deliberately has no such fallback: numpad 8 reports as VK_UP
-// under both NumLock states once Shift is held, so a working registration would
-// have to claim Shift+Up globally and break line-wise text selection in every
-// application. Without the hook the mode is still reachable from the tray menu
-// and the settings window.
+// The mode and convert-on-copy chords deliberately have no such fallback:
+// numpad 8 and numpad 7 report as VK_UP and VK_HOME under both NumLock states
+// once Shift is held, so a working registration would have to claim Shift+Up
+// and Shift+Home globally and break line-wise text selection in every
+// application. Without the hook both remain reachable from the tray menu and
+// the settings window.
 constexpr int kHotkeyNumpad9 = 1;
 constexpr int kHotkeyPrior   = 2;
 
-constexpr UINT kIdModeBase = 1000;  // 1000..1003 map onto uni::Mode 0..3
-constexpr UINT kIdExit     = 1100;
-constexpr UINT kIdSettings = 1101;
-constexpr int  kModeCount  = 4;
+constexpr UINT kIdModeBase      = 1000;  // 1000..1003 map onto uni::Mode 0..3
+constexpr UINT kIdExit          = 1100;
+constexpr UINT kIdSettings      = 1101;
+// A fresh decade rather than 1102+: the 110x block belongs to the fixed tray
+// commands above and stays free for them to grow into.
+constexpr UINT kIdBlacklistMode = 1110;
+constexpr UINT kIdProtectLinks  = 1111;
+constexpr UINT kIdAutoConvert   = 1112;
+constexpr int  kModeCount       = 4;
 
 // Stamped on every injected keyboard event so our own input is distinguishable
 // from real hardware input in traces / hooks.
 constexpr ULONG_PTR kInjectTag = 0x554E4950;  // 'UNIP'
 
 // Posted by the keyboard hook once a chord is recognised.
-constexpr UINT kMsgTrigger   = WM_APP + 2;  // Shift+Numpad9: convert and paste
-constexpr UINT kMsgCycleMode = WM_APP + 3;  // Shift+Numpad8: next mode
+constexpr UINT kMsgTrigger    = WM_APP + 2;  // Shift+Numpad9: convert and paste
+constexpr UINT kMsgCycleMode  = WM_APP + 3;  // Shift+Numpad8: next mode
+constexpr UINT kMsgToggleAuto = WM_APP + 4;  // Shift+Numpad7: convert on copy
 
-// Scan codes of the physical numpad 9 / numpad 8 keys. The grey PageUp and Up
-// keys are 0xE0 0x49 and 0xE0 0x48, i.e. the same scan codes plus the extended
-// flag, which is what keeps them out of our way.
+// Scan codes of the physical numpad 9 / 8 / 7 keys. The grey PageUp, Up and
+// Home keys are 0xE0 0x49, 0xE0 0x48 and 0xE0 0x47, i.e. the same scan codes
+// plus the extended flag, which is what keeps them out of our way.
 constexpr DWORD kNumpad9Scan = 0x49;
 constexpr DWORD kNumpad8Scan = 0x48;
+constexpr DWORD kNumpad7Scan = 0x47;
 
 // The NumLock-cancelling Shift release/press the keyboard layer fabricates
 // around numpad keys carries this bit in its scan code; real Shift input does
@@ -92,15 +117,27 @@ constexpr int   kClipboardTries   = 10;
 constexpr DWORD kClipboardRetryMs = 20;
 constexpr DWORD kSettleMs         = 30;  // let the modifier releases land
 
+// Convert-on-copy runs synchronously inside the message handler, so a
+// pathological clipboard (someone copied a whole log file) is skipped rather
+// than allowed to stall the UI thread.
+constexpr size_t kMaxAutoChars = 200000;
+
 // ---------------------------------------------------------------------------
 // State (POD only - no global objects with nontrivial destructors)
 // ---------------------------------------------------------------------------
+
+using RemoveClipboardFormatListenerFn = BOOL(WINAPI*)(HWND);
 
 HWND      g_hwnd            = nullptr;
 uni::Mode g_mode            = uni::Mode::Basic;
 UINT      g_taskbarCreated  = 0;
 bool      g_hotkeyNumpad9   = false;
 bool      g_hotkeyPrior     = false;
+// Persisted policy. Link protection defaults ON: a mangled URL is a broken URL,
+// which is a far worse surprise than a word that stayed in plain ASCII.
+bool      g_blacklistMode   = false;
+bool      g_protectLinks    = true;
+bool      g_autoConvert     = false;
 // Touched only by the hook thread (g_shiftDown, g_swallowUpVk) or only before
 // that thread starts and after it is joined - no synchronisation needed.
 HHOOK     g_keyHook         = nullptr;
@@ -110,6 +147,13 @@ DWORD     g_hookThreadId    = 0;
 bool      g_shiftDown       = false;
 WORD      g_swallowUpVk     = 0;
 bool      g_trayAdded       = false;
+// The clipboard sequence number as it stood immediately after our own most
+// recent clipboard write. The WM_CLIPBOARDUPDATE that write provokes reports
+// the very same number, which is how convert-on-copy tells its own echo from a
+// genuine new copy instead of converting its output over and over.
+DWORD     g_selfWriteSeq    = 0;
+bool      g_clipboardListener = false;
+RemoveClipboardFormatListenerFn g_removeClipboardListener = nullptr;
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -136,28 +180,27 @@ void EnablePerMonitorDpi()
     setContext(reinterpret_cast<HANDLE>(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2));
 }
 
-uni::Mode LoadMode()
+// One pair of primitives for every persisted value. The key is created on
+// demand by the writer and is simply absent on a first run.
+DWORD LoadDword(const wchar_t* name, DWORD fallback)
 {
     HKEY key = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kRegPath, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
-        return uni::Mode::Basic;
+        return fallback;
 
     DWORD   value = 0;
     DWORD   type  = 0;
     DWORD   size  = sizeof(value);
-    const LSTATUS status = RegQueryValueExW(key, kRegValue, nullptr, &type,
+    const LSTATUS status = RegQueryValueExW(key, name, nullptr, &type,
                                             reinterpret_cast<BYTE*>(&value), &size);
     RegCloseKey(key);
 
-    if (status == ERROR_SUCCESS && type == REG_DWORD && size == sizeof(value) &&
-        value < static_cast<DWORD>(kModeCount))
-    {
-        return static_cast<uni::Mode>(value);
-    }
-    return uni::Mode::Basic;
+    if (status == ERROR_SUCCESS && type == REG_DWORD && size == sizeof(value))
+        return value;
+    return fallback;
 }
 
-void SaveMode(uni::Mode mode)
+void SaveDword(const wchar_t* name, DWORD value)
 {
     HKEY key = nullptr;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, kRegPath, 0, nullptr, REG_OPTION_NON_VOLATILE,
@@ -166,10 +209,37 @@ void SaveMode(uni::Mode mode)
         return;
     }
 
-    const DWORD value = static_cast<DWORD>(mode);
-    RegSetValueExW(key, kRegValue, 0, REG_DWORD,
+    RegSetValueExW(key, name, 0, REG_DWORD,
                    reinterpret_cast<const BYTE*>(&value), static_cast<DWORD>(sizeof(value)));
     RegCloseKey(key);
+}
+
+bool LoadFlag(const wchar_t* name, bool fallback)
+{
+    return LoadDword(name, fallback ? 1u : 0u) != 0;
+}
+
+void SaveFlag(const wchar_t* name, bool value)
+{
+    SaveDword(name, value ? 1u : 0u);
+}
+
+uni::Mode LoadMode()
+{
+    const DWORD value = LoadDword(kRegMode, 0u);
+    if (value < static_cast<DWORD>(kModeCount))
+        return static_cast<uni::Mode>(value);
+    return uni::Mode::Basic;  // hand-edited or written by a future build
+}
+
+void SaveMode(uni::Mode mode)
+{
+    SaveDword(kRegMode, static_cast<DWORD>(mode));
+}
+
+uni::policy::Options CurrentOptions()
+{
+    return uni::policy::Options{g_blacklistMode, g_protectLinks};
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +281,14 @@ void RemoveTrayIcon(HWND hwnd)
     g_trayAdded = false;
 }
 
+// The complete flag set for a checkable tray item: MF_STRING and MF_UNCHECKED
+// are both zero, so the checkmark is the only bit that ever varies.
+UINT CheckableItem(bool checked)
+{
+    return static_cast<UINT>(MF_STRING) |
+           static_cast<UINT>(checked ? MF_CHECKED : MF_UNCHECKED);
+}
+
 void ShowTrayMenu(HWND hwnd)
 {
     POINT pt{};
@@ -232,6 +310,11 @@ void ShowTrayMenu(HWND hwnd)
     }
     CheckMenuRadioItem(menu, kIdModeBase, kIdModeBase + (kModeCount - 1),
                        kIdModeBase + static_cast<UINT>(g_mode), MF_BYCOMMAND);
+
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, CheckableItem(g_blacklistMode), kIdBlacklistMode, L"Blacklist mode");
+    AppendMenuW(menu, CheckableItem(g_protectLinks), kIdProtectLinks, L"Never convert links");
+    AppendMenuW(menu, CheckableItem(g_autoConvert), kIdAutoConvert, L"Convert on copy");
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kIdExit, L"Exit");
@@ -342,7 +425,47 @@ bool WriteClipboardText(HWND hwnd, const std::wstring& text, const wchar_t*& err
 
     // On success the clipboard owns `mem`; freeing it here would be a bug.
     CloseClipboard();
+
+    // Every clipboard write in this app funnels through here, which is what
+    // makes it impossible for a write path to skip the convert-on-copy loop
+    // guard: the notification our own write provokes carries this very number.
+    g_selfWriteSeq = GetClipboardSequenceNumber();
     return true;
+}
+
+// AddClipboardFormatListener / RemoveClipboardFormatListener are Vista+, and
+// are resolved at run time so the executable still loads on an older stack.
+// There convert-on-copy is simply inert; every other feature works unchanged.
+void InstallClipboardListener(HWND hwnd)
+{
+    using AddClipboardFormatListenerFn = BOOL(WINAPI*)(HWND);
+
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (!user32)
+        return;
+
+    auto add = reinterpret_cast<AddClipboardFormatListenerFn>(
+        GetProcAddress(user32, "AddClipboardFormatListener"));
+    auto remove = reinterpret_cast<RemoveClipboardFormatListenerFn>(
+        GetProcAddress(user32, "RemoveClipboardFormatListener"));
+    if (!add || !remove)
+        return;  // never register what cannot be unregistered
+
+    if (add(hwnd) != FALSE)
+    {
+        g_removeClipboardListener = remove;
+        g_clipboardListener       = true;
+    }
+}
+
+void RemoveClipboardListener(HWND hwnd)
+{
+    if (!g_clipboardListener)
+        return;
+
+    g_removeClipboardListener(hwnd);
+    g_removeClipboardListener = nullptr;
+    g_clipboardListener       = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -428,11 +551,9 @@ void OnConvertHotkey(HWND hwnd, WORD triggerVk)
         return;
     }
 
-    // Whitelisted words and phrases are pinned to their original code units.
-    std::vector<bool> mask;
-    uni::whitelist::Mark(text, mask);
-
-    std::wstring out = uni::Convert(text, g_mode, mask);
+    // uni::policy decides what survives verbatim - word list, links, or the
+    // inverse of the blacklist - and runs the substitution over the rest.
+    std::wstring out = uni::policy::Apply(text, g_mode, CurrentOptions());
 
     if (!WriteClipboardText(hwnd, out, error))
     {
@@ -445,6 +566,48 @@ void OnConvertHotkey(HWND hwnd, WORD triggerVk)
 }
 
 // ---------------------------------------------------------------------------
+// Convert on copy
+// ---------------------------------------------------------------------------
+
+// Runs on the UI thread straight out of WM_CLIPBOARDUPDATE. No worker thread:
+// nothing may race the hotkey path for ownership of the clipboard.
+void OnClipboardUpdate(HWND hwnd)
+{
+    if (!g_autoConvert)
+        return;
+
+    // Our own write raised this notification - the sequence number has not
+    // moved since WriteClipboardText recorded it, so nothing new arrived.
+    // Without this guard the write below would re-trigger us forever.
+    if (GetClipboardSequenceNumber() == g_selfWriteSeq)
+        return;
+
+    const wchar_t* error = nullptr;
+
+    std::wstring text;
+    if (!ReadClipboardText(hwnd, text, error))
+        return;  // a bitmap, an empty clipboard or a busy owner: not an error here
+
+    if (text.size() > kMaxAutoChars)
+        return;
+
+    std::wstring out = uni::policy::Apply(text, g_mode, CurrentOptions());
+
+    // Belt and braces behind the sequence guard: a second, idempotent pass
+    // writes nothing at all, so the two can never ping-pong.
+    if (out == text)
+        return;
+
+    if (!WriteClipboardText(hwnd, out, error))
+    {
+        overlay::Show(error, overlay::Kind::Error);
+        return;
+    }
+
+    overlay::Show(L"Converted on copy");
+}
+
+// ---------------------------------------------------------------------------
 // Low-level keyboard hook (primary trigger)
 // ---------------------------------------------------------------------------
 
@@ -452,10 +615,10 @@ void OnConvertHotkey(HWND hwnd, WORD triggerVk)
 // its two virtual-key faces it happens to be wearing.
 //
 // With NumLock ON and Shift held the numpad key reports as its navigation twin
-// (numpad 9 -> VK_PRIOR, numpad 8 -> VK_UP) but keeps the numpad's own
-// non-extended scan code. The grey navigation keys are the extended variants of
-// those same scan codes and must keep working normally, so the extended flag is
-// the whole discriminator.
+// (numpad 9 -> VK_PRIOR, numpad 8 -> VK_UP, numpad 7 -> VK_HOME) but keeps the
+// numpad's own non-extended scan code. The grey navigation keys are the
+// extended variants of those same scan codes and must keep working normally, so
+// the extended flag is the whole discriminator.
 bool IsNumpadChord(const KBDLLHOOKSTRUCT& ev, DWORD numpadVk, DWORD navVk, DWORD scan)
 {
     if (ev.vkCode == numpadVk)
@@ -475,6 +638,11 @@ bool IsNumpad8Event(const KBDLLHOOKSTRUCT& ev)
     return IsNumpadChord(ev, VK_NUMPAD8, VK_UP, kNumpad8Scan);
 }
 
+bool IsNumpad7Event(const KBDLLHOOKSTRUCT& ev)
+{
+    return IsNumpadChord(ev, VK_NUMPAD7, VK_HOME, kNumpad7Scan);
+}
+
 // True when `ev` releases the key whose key-down we swallowed.
 //
 // Matched by chord identity rather than by raw vk: the paste synthesis releases
@@ -490,6 +658,9 @@ bool IsPendingChordUp(const KBDLLHOOKSTRUCT& ev)
     case VK_NUMPAD8:
     case VK_UP:
         return IsNumpad8Event(ev);
+    case VK_NUMPAD7:
+    case VK_HOME:
+        return IsNumpad7Event(ev);
     default:
         return false;  // including 0: nothing pending
     }
@@ -534,6 +705,12 @@ LRESULT CALLBACK KeyboardHook(int code, WPARAM wParam, LPARAM lParam)
             g_swallowUpVk = static_cast<WORD>(ev.vkCode);
             PostMessageW(g_hwnd, kMsgCycleMode, 0, 0);
             return 1;  // swallow: no stray 8 / Up either
+        }
+        if (IsNumpad7Event(ev))
+        {
+            g_swallowUpVk = static_cast<WORD>(ev.vkCode);
+            PostMessageW(g_hwnd, kMsgToggleAuto, 0, 0);
+            return 1;  // swallow: no stray 7 / Home either
         }
     }
 
@@ -613,31 +790,88 @@ void RemoveKeyboardHook()
     g_hookThreadId = 0;
 }
 
-// The single funnel for every mode change: tray menu, settings combo and the
+// The single funnel for every mode change: tray menu, settings mode bar and the
 // Shift+Numpad8 chord all land here.
 void ApplyMode(uni::Mode mode)
 {
     g_mode = mode;
     SaveMode(mode);
-    // Re-entrant only in the harmless direction: the settings window selects
-    // the combo item programmatically, which raises no change notification.
-    settings::NotifyModeChanged();
+    // Re-entrant only in the harmless direction: the settings window applies
+    // the state programmatically, which raises no change notification.
+    settings::NotifyStateChanged();
 
     std::wstring message = L"Mode: ";
     message += uni::ModeName(mode);
     overlay::Show(message.c_str());
 }
 
+// The same funnel for the conversion policy. Both callers submit the whole
+// struct, so an unchanged submission costs nothing and the toast reports only
+// what actually moved.
+void ApplyOptions(const uni::policy::Options& opt)
+{
+    const bool blacklistChanged = (opt.blacklistMode != g_blacklistMode);
+    const bool linksChanged     = (opt.protectLinks != g_protectLinks);
+    if (!blacklistChanged && !linksChanged)
+        return;
+
+    g_blacklistMode = opt.blacklistMode;
+    g_protectLinks  = opt.protectLinks;
+    SaveFlag(kRegBlacklistMode, g_blacklistMode);
+    SaveFlag(kRegProtectLinks, g_protectLinks);
+    settings::NotifyStateChanged();
+
+    // One toast at a time - a second Show() only replaces the first - and no
+    // control flips both flags in a single submission.
+    if (blacklistChanged)
+        overlay::Show(g_blacklistMode ? L"Blacklist mode: on" : L"Blacklist mode: off");
+    else
+        overlay::Show(g_protectLinks ? L"Link protection: on" : L"Link protection: off");
+}
+
+// And for convert-on-copy: tray toggle, settings switch and the Shift+Numpad7
+// chord all land here.
+void ApplyAutoConvert(bool enabled)
+{
+    if (enabled == g_autoConvert)
+        return;
+
+    g_autoConvert = enabled;
+    SaveFlag(kRegAutoConvert, g_autoConvert);
+    settings::NotifyStateChanged();
+    overlay::Show(g_autoConvert ? L"Convert on copy: on" : L"Convert on copy: off");
+}
+
 // Plain functions rather than lambdas so their addresses match the
-// settings::GetModeFn / settings::SetModeFn pointer types exactly.
+// settings::Callbacks member types exactly.
 static uni::Mode GetModeCallback()
 {
     return g_mode;
 }
 
-static void ApplyModeCallback(uni::Mode mode)
+static void SetModeCallback(uni::Mode mode)
 {
     ApplyMode(mode);
+}
+
+static uni::policy::Options GetOptionsCallback()
+{
+    return CurrentOptions();
+}
+
+static void SetOptionsCallback(const uni::policy::Options& opt)
+{
+    ApplyOptions(opt);
+}
+
+static bool GetAutoConvertCallback()
+{
+    return g_autoConvert;
+}
+
+static void SetAutoConvertCallback(bool enabled)
+{
+    ApplyAutoConvert(enabled);
 }
 
 // ---------------------------------------------------------------------------
@@ -663,6 +897,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case kMsgCycleMode:
         // Mode-only chord: no clipboard access, no paste.
         ApplyMode(uni::NextMode(g_mode));
+        return 0;
+
+    case kMsgToggleAuto:
+        // Toggle-only chord: the clipboard listener does the work from here.
+        ApplyAutoConvert(!g_autoConvert);
+        return 0;
+
+    case WM_CLIPBOARDUPDATE:
+        OnClipboardUpdate(hwnd);
         return 0;
 
     case WM_HOTKEY:
@@ -695,6 +938,25 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             ApplyMode(static_cast<uni::Mode>(id - kIdModeBase));
             return 0;
         }
+        if (id == kIdBlacklistMode)
+        {
+            uni::policy::Options opt = CurrentOptions();
+            opt.blacklistMode = !opt.blacklistMode;
+            ApplyOptions(opt);
+            return 0;
+        }
+        if (id == kIdProtectLinks)
+        {
+            uni::policy::Options opt = CurrentOptions();
+            opt.protectLinks = !opt.protectLinks;
+            ApplyOptions(opt);
+            return 0;
+        }
+        if (id == kIdAutoConvert)
+        {
+            ApplyAutoConvert(!g_autoConvert);
+            return 0;
+        }
         if (id == kIdExit)
         {
             PostQuitMessage(0);
@@ -704,6 +966,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     }
 
     case WM_DESTROY:
+        // First: no clipboard notification may arrive mid-teardown.
+        RemoveClipboardListener(hwnd);
         RemoveTrayIcon(hwnd);
         RemoveKeyboardHook();
         if (g_hotkeyNumpad9)
@@ -787,15 +1051,24 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
         return 1;
     }
 
-    g_mode = LoadMode();
+    g_mode          = LoadMode();
+    g_blacklistMode = LoadFlag(kRegBlacklistMode, false);
+    g_protectLinks  = LoadFlag(kRegProtectLinks, true);
+    g_autoConvert   = LoadFlag(kRegAutoConvert, false);
 
-    // Loaded before the settings window exists so its list is populated the
+    // Loaded before the settings window exists so its lists are populated the
     // first time it is shown. A missing or unreadable file is not fatal - the
     // app then simply runs with an empty list, and the settings window is where
     // save/load errors surface.
-    (void)uni::whitelist::Load();
+    (void)uni::wordlist::Load(uni::wordlist::Kind::Never);
+    (void)uni::wordlist::Load(uni::wordlist::Kind::Only);
 
-    if (!settings::Init(hInst, &GetModeCallback, &ApplyModeCallback))
+    const settings::Callbacks callbacks{
+        &GetModeCallback,        &SetModeCallback,
+        &GetOptionsCallback,     &SetOptionsCallback,
+        &GetAutoConvertCallback, &SetAutoConvertCallback,
+    };
+    if (!settings::Init(hInst, callbacks))
     {
         ShowError(L"Could not initialise the UniPaste settings window.");
         overlay::Shutdown();
@@ -837,6 +1110,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
             CloseHandle(mutex);
         return 1;
     }
+
+    // Convert-on-copy needs clipboard change notifications. A failure here is
+    // not fatal: only that one feature goes quiet.
+    InstallClipboardListener(g_hwnd);
 
     AddTrayIcon(g_hwnd);
 

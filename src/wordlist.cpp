@@ -1,15 +1,28 @@
-// UniPaste - whitelist storage and matching.
+// UniPaste - word list storage and matching.
 //
-// The whitelist holds words and phrases that must survive the homoglyph
-// conversion untouched. It is persisted as a hand-editable UTF-8 text file at
-// %APPDATA%\UniPaste\whitelist.txt.
+// Two independent lists live in this module, selected by wordlist::Kind. They
+// share one file format, one parser and one matcher; only the storage slot and
+// the file name differ:
+//
+//   Kind::Never - words and phrases that must survive the homoglyph conversion
+//                 untouched. %APPDATA%\UniPaste\whitelist.txt.
+//   Kind::Only  - in blacklist mode, the only words that ARE converted;
+//                 everything else is left alone.
+//                 %APPDATA%\UniPaste\blacklist.txt.
+//
+// The two are deliberately separate files rather than one list with a flag:
+// silently inverting a curated never-convert list would convert exactly the
+// words the user had protected.
+//
+// Both are persisted as hand-editable UTF-8 text (BOM included, so Notepad
+// round-trips them) with '#' comment lines.
 //
 // Threading: every caller (the tray/hotkey WndProc and the settings dialog)
 // runs on the single UI thread, so the module keeps its state in plain globals
 // with no synchronisation. The low-level keyboard hook never touches it - it
 // only PostMessage()s the trigger, and the conversion happens in WndProc.
 
-#include "whitelist.h"
+#include "wordlist.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -20,14 +33,31 @@
 #include <cstddef>
 
 namespace uni {
-namespace whitelist {
+namespace wordlist {
 namespace {
 
 // A corrupt or hostile file must not turn into a multi-gigabyte allocation.
 // The realistic upper bound for a hand-maintained list is a few kilobytes.
 constexpr DWORD kMaxFileBytes = 8u * 1024u * 1024u;
 
-std::vector<std::wstring> g_entries;
+constexpr std::size_t kListCount = 2;
+
+// One slot per Kind. `path` is filled on first use by FilePath().
+struct List {
+    std::vector<std::wstring> entries;
+    std::wstring              path;
+};
+
+List g_lists[kListCount];
+
+std::size_t IndexOf(Kind kind) noexcept {
+    const std::size_t index = static_cast<std::size_t>(kind);
+    return (index < kListCount) ? index : 0;  // never index out of the array
+}
+
+List& ListFor(Kind kind) noexcept {
+    return g_lists[IndexOf(kind)];
+}
 
 // ---------------------------------------------------------------------------
 // Character helpers (locale-independent, mirroring spoof.cpp's ASCII fold)
@@ -47,8 +77,8 @@ constexpr bool IsAsciiSpace(wchar_t c) noexcept {
 
 // Word character for the boundary test: ASCII letter, ASCII digit, '_', or any
 // code unit >= 0x80. The last clause is the important one - an already
-// converted homoglyph (U+0430 and friends) counts as part of a word, so a
-// whitelist entry can never protect the interior of a larger token.
+// converted homoglyph (U+0430 and friends) counts as part of a word, so an
+// entry can never match the interior of a larger token.
 constexpr bool IsWordChar(wchar_t c) noexcept {
     return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') ||
            (c >= L'0' && c <= L'9') || c == L'_' ||
@@ -112,7 +142,13 @@ std::wstring FromUtf8(const char* data, std::size_t size) {
 // File I/O
 // ---------------------------------------------------------------------------
 
-std::wstring ComputeFilePath() {
+// The Never list keeps the original file name so existing users keep their
+// list across the upgrade.
+const wchar_t* FileNameFor(Kind kind) noexcept {
+    return (kind == Kind::Only) ? L"blacklist.txt" : L"whitelist.txt";
+}
+
+std::wstring ComputeFilePath(const wchar_t* fileName) {
     wchar_t buffer[MAX_PATH] = {};
     const HRESULT hr =
         SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, buffer);
@@ -123,7 +159,8 @@ std::wstring ComputeFilePath() {
         if (!path.empty() && path.back() != L'\\')
             path.push_back(L'\\');
     }
-    path += L"UniPaste\\whitelist.txt";
+    path += L"UniPaste\\";
+    path += fileName;
     return path;
 }
 
@@ -131,6 +168,20 @@ std::wstring ComputeFilePath() {
 std::wstring DirectoryOf(const std::wstring& path) {
     const std::size_t slash = path.find_last_of(L'\\');
     return (slash == std::wstring::npos) ? std::wstring() : path.substr(0, slash);
+}
+
+// Each list writes its own header so the file explains its own role - the two
+// have opposite meanings and end up side by side in the same directory.
+void AppendHeader(Kind kind, std::wstring& text) {
+    if (kind == Kind::Only) {
+        text += L"# UniPaste convert-only list - one entry per line. In blacklist mode\r\n";
+        text += L"# these are the ONLY words that get converted; everything else is\r\n";
+        text += L"# left exactly as it was.\r\n";
+    } else {
+        text += L"# UniPaste whitelist - one entry per line; these are never converted.\r\n";
+    }
+    text += L"# Lines starting with '#' are comments. Matching is case-insensitive\r\n";
+    text += L"# and requires a word boundary at both ends.\r\n";
 }
 
 // `missing` distinguishes "no file yet" (a normal first run) from a genuine
@@ -205,51 +256,55 @@ bool WriteWholeFile(const std::wstring& path, const std::string& bytes) {
 // List management
 // ---------------------------------------------------------------------------
 
-const std::vector<std::wstring>& Entries() {
-    return g_entries;
+const std::vector<std::wstring>& Entries(Kind kind) {
+    return ListFor(kind).entries;
 }
 
 // Intentionally does NOT persist: the settings UI batches edits and calls
 // Save() once, so a rejected duplicate never rewrites the file.
-bool Add(std::wstring_view entry) {
+bool Add(Kind kind, std::wstring_view entry) {
     const std::wstring_view trimmed = Trim(entry);
     if (trimmed.empty())
         return false;
 
-    for (const std::wstring& existing : g_entries) {
+    std::vector<std::wstring>& entries = ListFor(kind).entries;
+    for (const std::wstring& existing : entries) {
         if (EqualsFold(existing, trimmed))
             return false;
     }
 
-    g_entries.emplace_back(trimmed);
+    entries.emplace_back(trimmed);
     return true;
 }
 
-bool RemoveAt(size_t index) {
-    if (index >= g_entries.size())
+bool RemoveAt(Kind kind, size_t index) {
+    std::vector<std::wstring>& entries = ListFor(kind).entries;
+    if (index >= entries.size())
         return false;
 
-    g_entries.erase(g_entries.begin() + static_cast<std::ptrdiff_t>(index));
+    entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(index));
     return true;
 }
 
-const std::wstring& FilePath() {
-    static const std::wstring path = ComputeFilePath();
-    return path;
+const std::wstring& FilePath(Kind kind) {
+    List& list = ListFor(kind);
+    if (list.path.empty())
+        list.path = ComputeFilePath(FileNameFor(kind));
+    return list.path;
 }
 
 // ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------
 
-bool Load() {
+bool Load(Kind kind) {
     std::string bytes;
     bool missing = false;
-    if (!ReadWholeFile(FilePath(), bytes, missing)) {
+    if (!ReadWholeFile(FilePath(kind), bytes, missing)) {
         return false;  // genuine read failure: keep whatever is in memory
     }
 
-    g_entries.clear();
+    ListFor(kind).entries.clear();
     if (missing || bytes.empty())
         return true;
 
@@ -274,7 +329,7 @@ bool Load() {
 
         const std::wstring_view line = Trim(std::wstring_view(text).substr(start, end - start));
         if (!line.empty() && line.front() != L'#')
-            Add(line);  // handles trimming and case-insensitive de-duplication
+            Add(kind, line);  // handles trimming and case-insensitive de-duplication
 
         if (end >= text.size())
             break;
@@ -284,8 +339,8 @@ bool Load() {
     return true;
 }
 
-bool Save() {
-    const std::wstring& path      = FilePath();
+bool Save(Kind kind) {
+    const std::wstring& path      = FilePath(kind);
     const std::wstring  directory = DirectoryOf(path);
     if (!directory.empty() && !CreateDirectoryW(directory.c_str(), nullptr)) {
         const DWORD error = GetLastError();
@@ -294,10 +349,8 @@ bool Save() {
     }
 
     std::wstring text;
-    text += L"# UniPaste whitelist - one entry per line; these are never converted.\r\n";
-    text += L"# Lines starting with '#' are comments. Matching is case-insensitive\r\n";
-    text += L"# and requires a word boundary at both ends.\r\n";
-    for (const std::wstring& entry : g_entries) {
+    AppendHeader(kind, text);
+    for (const std::wstring& entry : ListFor(kind).entries) {
         text += entry;
         text += L"\r\n";
     }
@@ -311,9 +364,11 @@ bool Save() {
 // Matching
 // ---------------------------------------------------------------------------
 
-void Mark(std::wstring_view input, std::vector<bool>& mask) {
+void Mark(Kind kind, std::wstring_view input, std::vector<bool>& mask) {
+    const std::vector<std::wstring>& entries = ListFor(kind).entries;
+
     const std::size_t length = input.size();
-    if (g_entries.empty() || length == 0) {
+    if (entries.empty() || length == 0) {
         mask.clear();
         return;
     }
@@ -322,13 +377,13 @@ void Mark(std::wstring_view input, std::vector<bool>& mask) {
     // Sorting a private index vector leaves the order seen through Entries()
     // (and therefore the settings list box and the file) untouched.
     std::vector<std::size_t> order;
-    order.reserve(g_entries.size());
-    for (std::size_t i = 0; i < g_entries.size(); ++i) {
-        if (!g_entries[i].empty() && g_entries[i].size() <= length)
+    order.reserve(entries.size());
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (!entries[i].empty() && entries[i].size() <= length)
             order.push_back(i);
     }
-    std::stable_sort(order.begin(), order.end(), [](std::size_t a, std::size_t b) {
-        return g_entries[a].size() > g_entries[b].size();
+    std::stable_sort(order.begin(), order.end(), [&entries](std::size_t a, std::size_t b) {
+        return entries[a].size() > entries[b].size();
     });
     if (order.empty()) {
         mask.clear();
@@ -351,7 +406,7 @@ void Mark(std::wstring_view input, std::vector<bool>& mask) {
         std::size_t matchedLength = 0;
 
         for (const std::size_t index : order) {
-            const std::wstring& entry = g_entries[index];
+            const std::wstring& entry = entries[index];
             const std::size_t   count = entry.size();
             if (i + count > length)
                 continue;
@@ -393,5 +448,5 @@ void Mark(std::wstring_view input, std::vector<bool>& mask) {
         mask.clear();
 }
 
-} // namespace whitelist
+} // namespace wordlist
 } // namespace uni
