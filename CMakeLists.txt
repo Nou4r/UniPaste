@@ -14,6 +14,8 @@ add_executable(UniPaste WIN32
     src/overlay.cpp
     src/whitelist.cpp
     src/settings.cpp
+    src/theme.cpp
+    src/appicon.cpp
 )
 
 target_compile_definitions(UniPaste PRIVATE
@@ -32,6 +34,8 @@ target_link_libraries(UniPaste PRIVATE
     shell32
     advapi32
     comctl32
+    uxtheme
+    dwmapi
 )
 
 set_property(TARGET UniPaste PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")

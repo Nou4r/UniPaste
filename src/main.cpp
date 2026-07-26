@@ -18,9 +18,11 @@
 #include <string>
 #include <vector>
 
+#include "appicon.h"
 #include "overlay.h"
 #include "settings.h"
 #include "spoof.h"
+#include "theme.h"
 #include "whitelist.h"
 
 // Present in the Windows 10 1703+ SDK headers only; define a compatible
@@ -182,7 +184,7 @@ void FillTrayData(NOTIFYICONDATAW& nid, HWND hwnd)
     nid.uID              = kTrayIconId;
     nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = kTrayCallback;
-    nid.hIcon            = LoadIconW(nullptr, IDI_APPLICATION);
+    nid.hIcon            = appicon::Get(GetSystemMetrics(SM_CXSMICON));
 
     static_assert(sizeof(kTrayTip) <= sizeof(nid.szTip), "tray tip too long");
     CopyMemory(nid.szTip, kTrayTip, sizeof(kTrayTip));
@@ -751,6 +753,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInst;
     wc.lpszClassName = kClassName;
+    wc.hIcon         = appicon::Get(GetSystemMetrics(SM_CXICON));
+    wc.hIconSm       = appicon::Get(GetSystemMetrics(SM_CXSMICON));
     if (!RegisterClassExW(&wc))
     {
         ShowError(L"Could not register the UniPaste window class.");
@@ -854,6 +858,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int)
     g_hwnd = nullptr;
     settings::Shutdown();
     overlay::Shutdown();
+    theme::Shutdown();
+    appicon::Shutdown();
     UnregisterClassW(kClassName, hInst);
     if (mutex)
     {

@@ -227,7 +227,10 @@ bool EnsureFont(int dpi) {
     if (g.font && g.fontDpi == dpi) return true;
     HFONT f = CreateFontW(-MulDiv(kFontPx, dpi, 96), 0, 0, 0, FW_SEMIBOLD,
                           FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                          OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                          // Grayscale AA: ClearType fringes assume an opaque
+                          // backdrop, and this is a per-pixel-alpha layered
+                          // window composited over arbitrary content.
+                          OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
                           DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     if (!f) return g.font != nullptr;
     if (g.font) DeleteObject(g.font);

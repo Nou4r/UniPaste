@@ -10,8 +10,9 @@ different string, because `a` is now `U+0430 CYRILLIC SMALL LETTER A` and no lon
 
 It is a native C++17 Win32 application: plain Win32, GDI and common controls, no .NET, no Electron,
 no Qt, no runtime redistributable. The Release build is a single statically-linked executable of
-roughly 174 KB (177,664 bytes at the time of writing) that links only `user32`, `gdi32`, `shell32`,
-`advapi32` and `comctl32`, with the CRT linked statically (`MSVC_RUNTIME_LIBRARY = MultiThreaded`).
+roughly 203 KB (207,872 bytes at the time of writing) that links only `user32`, `gdi32`, `shell32`,
+`advapi32`, `comctl32`, `uxtheme` and `dwmapi`, with the CRT linked statically
+(`MSVC_RUNTIME_LIBRARY = MultiThreaded`).
 
 ---
 
@@ -97,6 +98,8 @@ written outside `HKCU\Software\UniPaste` and `%APPDATA%\UniPaste`.
 
 Run `UniPaste.exe`. It has no main window - it lives in the notification area.
 
+![The UniPaste settings window](docs/settings.png)
+
 ### Hotkeys
 
 | Hotkey | Action |
@@ -121,6 +124,26 @@ Double-clicking the tray icon opens the settings window directly.
 The settings window is modeless: it can stay open while you keep using the hotkeys, and it refreshes
 itself when the mode is changed from the tray menu or by `Shift + Numpad8`. Closing it does not quit
 the application - use **Exit** for that.
+
+### Settings window
+
+A single dark surface, drawn rather than themed: the four modes are a segmented bar instead of a
+drop-down, and the card under it is a **live specimen** of the active mode. It runs the sample
+`Mixed Case 123` through the real converter - whitelist included - draws every substituted glyph in
+amber against the unchanged characters, and lists the substitutions as `i -> U+0456` pairs in a
+monospace face. Switching modes re-renders it, so the difference between `Basic` and `Advanced` is
+visible before you convert anything.
+
+Everything is keyboard operable. `Tab` reaches the segmented bar at the currently active cell;
+`Left` / `Right` / `Up` / `Down` change the mode, `Home` and `End` jump to the ends. `Enter` in the
+text field adds a word, `Delete` removes the selected one, `Esc` closes the window. The focused
+control always carries a visible amber ring - the dotted system focus rectangle is not used.
+
+The palette is a cool indigo-slate base (`#14141B` / `#1C1C25`) with a single warm amber accent
+(`#E0944A`). Green and red are deliberately absent from the chrome: they are reserved for toast
+status, so a colour in the window never competes with a colour that reports an outcome. Text is
+rendered with grayscale antialiasing rather than ClearType, because subpixel fringes read as colour
+noise on a dark background.
 
 ---
 
@@ -370,6 +393,8 @@ UniPaste/
 │                       and Advanced substitution tables come from its unicodeConverter() maps.
 │                       Kept verbatim as the reference implementation - do not edit.
 ├── README.md           This document.
+├── docs/
+│   └── settings.png    Screenshot of the settings window used above.
 └── src/
     ├── main.cpp        wWinMain, single-instance mutex, hidden UniPasteMain window, tray icon and
     │                   menu, WH_KEYBOARD_LL hook on its own pump thread, clipboard read/write with
@@ -382,10 +407,19 @@ UniPaste/
     ├── whitelist.h     Whitelist API: Entries / Add / RemoveAt / Load / Save / FilePath / Mark.
     ├── whitelist.cpp   Whitelist storage (%APPDATA%\UniPaste\whitelist.txt) and the word-boundary,
     │                   case-insensitive matcher that builds the protected-span mask.
+    ├── theme.h         Design tokens (palette, six font roles) and the drawing API.
+    ├── theme.cpp       Font cache, dark title bar, and an offscreen BGRA canvas with antialiased
+    │                   rounded-rectangle fills and strokes - GDI has no antialiased primitives, so
+    │                   coverage is supersampled and blended per pixel.
+    ├── appicon.h       Icon API: Get(px) / Shutdown.
+    ├── appicon.cpp     Generates the app icon at runtime - a Cyrillic small a (U+0430) in amber on
+    │                   a rounded tile. The mark is the product: it reads as a Latin 'a' but is the
+    │                   substituted character.
     ├── settings.h      Settings window API: Init / Show / NotifyModeChanged / Shutdown /
     │                   HandleDialogMessage.
-    └── settings.cpp    The settings GUI: whitelist list box, add/remove controls and the mode
-                        selection, kept in sync with the tray menu and the mode-cycle hotkey.
+    └── settings.cpp    The settings GUI: segmented mode bar, live specimen card, owner-drawn
+                        whitelist list, and the add/remove controls, kept in sync with the tray
+                        menu and the mode-cycle hotkey.
 ```
 
 ---
