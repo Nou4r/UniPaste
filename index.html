@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Unicode Text Converter</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/alpinejs/3.14.8/cdn.js" defer></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        dark: {
+                            100: '#1a1a1a',
+                            200: '#2d2d2d',
+                            300: '#404040',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="min-h-screen p-8 bg-gray-100 dark:bg-gray-900 transition-colors duration-200">
+    <div x-data="{ 
+        darkMode: localStorage.getItem('darkMode') === 'true' || true,
+        toggleDarkMode() {
+            this.darkMode = !this.darkMode;
+            localStorage.setItem('darkMode', this.darkMode);
+            if (this.darkMode) {
+                document.documentElement.classList.add('dark');
+            } else {
+                document.documentElement.classList.remove('dark');
+            }
+        }
+    }" x-init="darkMode && document.documentElement.classList.add('dark')" class="max-w-4xl mx-auto">
+        
+        <!-- Header Section -->
+        <div class="flex justify-between items-center mb-8">
+            <h1 class="text-3xl font-bold text-gray-800 dark:text-white">Unicode Text Converter</h1>
+            <button 
+                @click="toggleDarkMode"
+                class="p-2 rounded-lg bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors">
+                <svg x-show="darkMode" class="w-6 h-6 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707"/>
+                </svg>
+                <svg x-show="!darkMode" class="w-6 h-6 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+                </svg>
+            </button>
+        </div>
+
+        <div x-data="unicodeConverter()" x-init="init()" class="space-y-6">
+            <!-- Input Area -->
+            <div>
+                <label class="block text-gray-700 dark:text-gray-300 mb-2">Input Text:</label>
+                <textarea 
+                    x-model="inputText" 
+                    @input="convertText"
+                    class="w-full h-32 p-4 border rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 bg-white dark:bg-gray-800 dark:border-gray-700 dark:text-white"
+                    placeholder="Enter your text here..."></textarea>
+            </div>
+
+            <!-- Output Area -->
+            <div>
+                <label class="block text-gray-700 dark:text-gray-300 mb-2">Converted Text:</label>
+                <div class="relative">
+                    <div 
+                        x-html="formattedOutput"
+                        class="w-full h-32 p-4 bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg shadow-sm overflow-auto dark:text-white"></div>
+                    <button 
+                        @click="copyToClipboard"
+                        class="absolute right-2 top-2 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                        Copy
+                    </button>
+                </div>
+            </div>
+
+            <!-- Statistics -->
+            <div class="bg-white dark:bg-gray-800 p-4 rounded-lg shadow-sm">
+                <h3 class="font-semibold mb-2 dark:text-white">Statistics:</h3>
+                <div class="grid grid-cols-3 gap-4">
+                    <div class="text-center p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                        <p class="text-sm text-gray-600 dark:text-gray-400">Total</p>
+                        <p class="text-xl font-bold dark:text-white" x-text="stats.total"></p>
+                    </div>
+                    <div class="text-center p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                        <p class="text-sm text-gray-600 dark:text-gray-400">Spoofed</p>
+                        <p class="text-xl font-bold text-green-600 dark:text-green-400" x-text="stats.spoofed"></p>
+                    </div>
+                    <div class="text-center p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                        <p class="text-sm text-gray-600 dark:text-gray-400">Unspoofed</p>
+                        <p class="text-xl font-bold text-red-600 dark:text-red-400" x-text="stats.unspoofed"></p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Options -->
+            <div class="bg-white dark:bg-gray-800 p-4 rounded-lg shadow-sm">
+                <h3 class="font-semibold mb-4 dark:text-white">Options</h3>
+                <div class="space-y-4">
+                    <!-- Mode Selector -->
+                    <div class="mb-4">
+                        <label class="block text-gray-700 dark:text-gray-300 mb-2">Conversion Mode:</label>
+                        <select 
+                            x-model="selectedMode"
+                            @change="localStorage.setItem('selectedMode', selectedMode); convertText()"
+                            class="w-full p-2 border rounded-lg bg-white dark:bg-gray-800 dark:border-gray-600 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                            <template x-for="(mode, key) in modes" :key="key">
+                                <option :value="key" x-text="mode.name" class="dark:bg-gray-800"></option>
+                            </template>
+                        </select>
+                        <!-- Mode Description -->
+                        <p class="mt-2 text-gray-600 dark:text-gray-400" x-text="modes[selectedMode].description"></p>
+                    </div>
+                    
+                    <label class="flex items-center space-x-3">
+                        <input type="checkbox" x-model="options.includeZeroWidth"
+                            @change="saveOptions(); convertText()" 
+                            class="form-checkbox rounded text-blue-500 focus:ring-blue-500 dark:bg-gray-700">
+                        <span class="dark:text-gray-300">Include Zero-Width Spaces</span>
+                    </label>
+                    <label class="flex items-center space-x-3">
+                        <input type="checkbox" x-model="options.highlightUnspoofed"
+                            @change="saveOptions(); convertText()" 
+                            class="form-checkbox rounded text-blue-500 focus:ring-blue-500 dark:bg-gray-700">
+                        <span class="dark:text-gray-300">Highlight Unspoofed Characters</span>
+                    </label>
+                </div>
+
+                <!-- Output Format Selector -->
+                <div class="mt-8">
+                    <label class="block text-gray-700 dark:text-gray-300 mb-2">Output Format:</label>
+                    <select 
+                        x-model="outputFormat"
+                        @change="convertText()"
+                        class="w-full p-2 border rounded-lg bg-white dark:bg-gray-800 dark:border-gray-600 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                        <option value="normal">Normal</option>
+                        <option value="unicodeEscaped">Unicode Escaped (\\uXXXX)</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function unicodeConverter() {
+            return {
+                inputText: localStorage.getItem('inputText') || '',
+                outputText: '',
+                formattedOutput: '',
+                // Updated Output Format options
+                outputFormat: localStorage.getItem('outputFormat') || 'normal',
+
+                selectedMode: localStorage.getItem('selectedMode') || 'basic',
+
+                modes: {
+                    basic: {
+                        name: 'Basic',
+                        description: 'Applies a simple spoofing map to all characters in the text.',
+                        map: {
+                            'e': 'е',
+                            'y': 'у',
+                            'i': 'і',
+                            'o': 'о',
+                            'p': 'р',
+                            'a': 'а',
+                            's': 'ѕ',
+                            'j': 'ј',
+                            'x': 'х',
+                            'c': 'с'
+                        }
+                    },
+                    advanced: {
+                        name: 'Advanced',
+                        description: 'Uses a comprehensive spoofing map to replace characters, offering more extensive spoofing.',
+                        map: {
+                            'a': 'α', 'b': 'β', 'c': 'ϲ', 'd': 'ԁ', 'e': 'е',
+                            'f': 'ſ', 'g': 'ɡ', 'h': 'һ', 'i': 'і', 'j': 'ј',
+                            'k': 'κ', 'l': 'ӏ', 'm': 'м', 'n': 'ո', 'o': 'о',
+                            'p': 'р', 'q': 'ԛ', 'r': 'г', 's': 'ѕ', 't': 'т',
+                            'u': 'υ', 'v': 'ν', 'w': 'ѡ', 'x': 'х', 'y': 'у'
+                        }
+                    },
+                    first: {
+                        name: 'First Mode',
+                        description: 'Uses the Advanced mode for the first character and Basic mode for the rest of the text.',
+                    },
+                    smart: {
+                        name: 'Smart Mode',
+                        description: 'If the first two characters are unspoofable in Basic mode, it applies the Advanced mode to them and Basic mode for the rest. Otherwise, it defaults to Basic mode for the entire text.',
+                    }
+                },
+
+                options: {
+                    includeZeroWidth: false,
+                    highlightUnspoofed: true
+                },
+
+                stats: {
+                    total: 0,
+                    spoofed: 0,
+                    unspoofed: 0
+                },
+
+                init() {
+                    this.loadOptions();
+                    this.convertText();
+                },
+
+                loadOptions() {
+                    const savedOptions = localStorage.getItem('options');
+                    if (savedOptions) {
+                        this.options = JSON.parse(savedOptions);
+                    }
+                    const savedOutputFormat = localStorage.getItem('outputFormat');
+                    if (savedOutputFormat) {
+                        this.outputFormat = savedOutputFormat;
+                    }
+                },
+
+                saveOptions() {
+                    localStorage.setItem('options', JSON.stringify(this.options));
+                },
+
+                convertText() {
+                    localStorage.setItem('inputText', this.inputText);
+                    localStorage.setItem('outputFormat', this.outputFormat);
+
+                    let result = '';
+                    let formattedResult = '';
+                    let spoofedCount = 0;
+                    let unspoofedCount = 0;
+                    
+                    this.stats.total = this.inputText.length;
+                    
+                    const basicMap = this.modes['basic'].map;
+                    const advancedMap = this.modes['advanced'].map;
+                    const textLength = this.inputText.length;
+
+                    // Helper to spoof a character based on a map
+                    const spoofChar = (char, map) => {
+                        const lowerChar = char.toLowerCase();
+                        const spoofedChar = map[lowerChar];
+                        if (spoofedChar && spoofedChar !== char && spoofedChar !== lowerChar) {
+                            return { spoofed: true, char: spoofedChar };
+                        } else {
+                            return { spoofed: false, char: char };
+                        }
+                    };
+
+                    // MAIN conversion logic based on selectedMode
+                    if (this.selectedMode === 'basic' || this.selectedMode === 'advanced') {
+                        const currentMap = this.modes[this.selectedMode].map;
+                        for (let char of this.inputText) {
+                            const { spoofed, char: newChar } = spoofChar(char, currentMap);
+                            
+                            if (spoofed) {
+                                result += newChar;
+                                formattedResult += newChar;
+                                spoofedCount++;
+                            } else {
+                                result += char;
+                                // Highlight unspoofed if desired and only in normal text format
+                                formattedResult += this.options.highlightUnspoofed && this.outputFormat === 'normal' ? 
+                                    `<span class="text-red-500 dark:text-red-400">${char}</span>` : char;
+                                if (char !== ' ') {
+                                    unspoofedCount++;
+                                }
+                            }
+
+                            if (this.options.includeZeroWidth) {
+                                result += '\u200B';
+                                formattedResult += '\u200B';
+                            }
+                        }
+                    } 
+                    else if (this.selectedMode === 'first') {
+                        for (let i = 0; i < textLength; i++) {
+                            let char = this.inputText[i];
+                            if (i === 0) {
+                                // First character uses advanced map
+                                const { spoofed, char: newChar } = spoofChar(char, advancedMap);
+                                if (spoofed) {
+                                    result += newChar;
+                                    formattedResult += newChar;
+                                    spoofedCount++;
+                                } else {
+                                    result += char;
+                                    formattedResult += this.options.highlightUnspoofed && this.outputFormat === 'normal' 
+                                        ? `<span class="text-red-500 dark:text-red-400">${char}</span>` 
+                                        : char;
+                                    if (char !== ' ') {
+                                        unspoofedCount++;
+                                    }
+                                }
+                            } else {
+                                // Rest use basic map
+                                const { spoofed, char: newChar } = spoofChar(char, basicMap);
+                                if (spoofed) {
+                                    result += newChar;
+                                    formattedResult += newChar;
+                                    spoofedCount++;
+                                } else {
+                                    result += char;
+                                    formattedResult += this.options.highlightUnspoofed && this.outputFormat === 'normal' 
+                                        ? `<span class="text-red-500 dark:text-red-400">${char}</span>` 
+                                        : char;
+                                    if (char !== ' ') {
+                                        unspoofedCount++;
+                                    }
+                                }
+                            }
+
+                            if (this.options.includeZeroWidth) {
+                                result += '\u200B';
+                                formattedResult += '\u200B';
+                            }
+                        }
+                    }
+                    else if (this.selectedMode === 'smart') {
+                        // Decide if first two characters are unspoofable in basic
+                        let useAdvancedForFirstTwo = false;
+                        if (textLength >= 2) {
+                            const firstChar = this.inputText[0];
+                            const secondChar = this.inputText[1];
+                            const firstSpoof = basicMap[firstChar.toLowerCase()];
+                            const secondSpoof = basicMap[secondChar.toLowerCase()];
+                            if ((!firstSpoof || firstSpoof === firstChar.toLowerCase()) &&
+                                (!secondSpoof || secondSpoof === secondChar.toLowerCase())) {
+                                useAdvancedForFirstTwo = true;
+                            }
+                        } else if (textLength === 1) {
+                            const firstChar = this.inputText[0];
+                            const firstSpoof = basicMap[firstChar.toLowerCase()];
+                            if (!firstSpoof || firstSpoof === firstChar.toLowerCase()) {
+                                useAdvancedForFirstTwo = true;
+                            }
+                        }
+
+                        for (let i = 0; i < textLength; i++) {
+                            let char = this.inputText[i];
+                            if (useAdvancedForFirstTwo && (i === 0 || i === 1)) {
+                                // Use advanced map
+                                const { spoofed, char: newChar } = spoofChar(char, advancedMap);
+                                if (spoofed) {
+                                    result += newChar;
+                                    formattedResult += newChar;
+                                    spoofedCount++;
+                                } else {
+                                    result += char;
+                                    formattedResult += this.options.highlightUnspoofed && this.outputFormat === 'normal'
+                                        ? `<span class="text-red-500 dark:text-red-400">${char}</span>`
+                                        : char;
+                                    if (char !== ' ') {
+                                        unspoofedCount++;
+                                    }
+                                }
+                            } else {
+                                // Use basic map
+                                const { spoofed, char: newChar } = spoofChar(char, basicMap);
+                                if (spoofed) {
+                                    result += newChar;
+                                    formattedResult += newChar;
+                                    spoofedCount++;
+                                } else {
+                                    result += char;
+                                    formattedResult += this.options.highlightUnspoofed && this.outputFormat === 'normal'
+                                        ? `<span class="text-red-500 dark:text-red-400">${char}</span>`
+                                        : char;
+                                    if (char !== ' ') {
+                                        unspoofedCount++;
+                                    }
+                                }
+                            }
+
+                            if (this.options.includeZeroWidth) {
+                                result += '\u200B';
+                                formattedResult += '\u200B';
+                            }
+                        }
+                    }
+
+                    // Handle Output Format
+                    if (this.outputFormat === 'unicodeEscaped') {
+                        let unicodeEscaped = '';
+                        for (const c of result) {
+                            const codePoint = c.codePointAt(0);
+                            if (codePoint <= 0xFFFF) {
+                                unicodeEscaped += `\\u${codePoint.toString(16).padStart(4, '0').toUpperCase()}`;
+                            } else {
+                                // For code points beyond U+FFFF, use surrogate pairs
+                                const highSurrogate = 0xD800 + ((codePoint - 0x10000) >> 10);
+                                const lowSurrogate = 0xDC00 + ((codePoint - 0x10000) & 0x3FF);
+                                unicodeEscaped += `\\u${highSurrogate.toString(16).toUpperCase()}\\u${lowSurrogate.toString(16).toUpperCase()}`;
+                            }
+                        }
+                        this.outputText = unicodeEscaped;
+                        // No highlighting in Unicode Escaped mode
+                        this.formattedOutput = unicodeEscaped.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    } else {
+                        // Normal mode
+                        this.outputText = result;
+                        this.formattedOutput = formattedResult;
+                    }
+
+                    this.stats.spoofed = spoofedCount;
+                    this.stats.unspoofed = unspoofedCount;
+                },
+
+                async copyToClipboard() {
+                    try {
+                        // Copy the same text that is displayed in the output
+                        await navigator.clipboard.writeText(this.outputText);
+                    } catch (err) {
+                        console.error('Failed to copy text: ', err);
+                    }
+                }
+            }
+        }
+    </script>
+</body>
+</html>
